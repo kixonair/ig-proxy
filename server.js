@@ -1,9 +1,13 @@
 const http  = require('http');
 const https = require('https');
+const { HttpsProxyAgent } = require('https-proxy-agent');
 
 const PORT       = process.env.PORT || 3000;
 const SESSION_ID = process.env.IG_SESSION_ID || '';
 const SECRET_KEY = process.env.SECRET_KEY || 'spyxsocial2024';
+
+// IPRoyal Web Unblocker — smart anti-bot bypass
+const PROXY_URL = 'http://Cb6Vso1398593:1lWNf7Wh8GCIEVNS@unblocker.iproyal.com:12323';
 
 const WEB_UAS = [
   'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36',
@@ -14,13 +18,14 @@ const rWeb = () => WEB_UAS[Math.floor(Math.random() * WEB_UAS.length)];
 
 function fetchUrl(url, headers) {
   return new Promise((resolve, reject) => {
-    const req = https.get(url, { headers }, (res) => {
+    const agent = new HttpsProxyAgent(PROXY_URL);
+    const req = https.get(url, { agent, headers }, (res) => {
       let data = '';
       res.on('data', chunk => data += chunk);
       res.on('end', () => resolve({ status: res.statusCode, body: data, headers: res.headers }));
     });
     req.on('error', reject);
-    req.setTimeout(20000, () => { req.destroy(); reject(new Error('timeout')); });
+    req.setTimeout(25000, () => { req.destroy(); reject(new Error('timeout')); });
   });
 }
 
@@ -29,7 +34,6 @@ async function fetchProfile(username) {
 
   for (let attempt = 0; attempt < 3; attempt++) {
     try {
-      // Step 1: get CSRF
       const home = await fetchUrl('https://www.instagram.com/', {
         'User-Agent': rWeb(),
         'Accept': 'text/html',
@@ -40,16 +44,11 @@ async function fetchProfile(username) {
       const setCookie = home.headers['set-cookie'] || [];
       const cookieStr = Array.isArray(setCookie) ? setCookie.join('; ') : String(setCookie);
       const csrf = cookieStr.match(/csrftoken=([^;,\s]+)/)?.[1] || '';
-      if (!csrf) {
-        console.log(`No CSRF on attempt ${attempt + 1}`);
-        continue;
-      }
+      if (!csrf) { console.log(`No CSRF attempt ${attempt + 1}`); continue; }
       const cookies = session ? `csrftoken=${csrf}; sessionid=${session}` : `csrftoken=${csrf}`;
 
-      // Step 2: delay
       await new Promise(r => setTimeout(r, 1000 + Math.random() * 1500));
 
-      // Step 3: API call
       const r = await fetchUrl(
         `https://www.instagram.com/api/v1/users/web_profile_info/?username=${encodeURIComponent(username)}`,
         {
@@ -91,31 +90,23 @@ const server = http.createServer(async (req, res) => {
   res.setHeader('Access-Control-Allow-Origin', '*');
   const urlObj = new URL(req.url, 'http://localhost');
 
-  // ── HEALTH ──────────────────────────────────────────────────
   if (urlObj.pathname === '/health') {
     res.setHeader('Content-Type', 'application/json');
     res.writeHead(200);
-    res.end(JSON.stringify({
-      status: 'ok',
-      session: SESSION_ID ? 'set' : 'missing',
-      mode: 'direct-ip'
-    }));
+    res.end(JSON.stringify({ status: 'ok', session: SESSION_ID ? 'set' : 'missing', proxy: 'iproyal-unblocker' }));
     return;
   }
 
-  // ── DEBUG ────────────────────────────────────────────────────
   if (urlObj.pathname === '/debug') {
     res.setHeader('Content-Type', 'text/plain');
     const log = [];
     const session = SESSION_ID ? decodeURIComponent(SESSION_ID) : '';
 
-    // 1. Our outbound IP
     try {
       const r = await fetchUrl('https://api.ipify.org?format=json', { 'User-Agent': 'test' });
       log.push(`Outbound IP: ${r.body}`);
-    } catch(e) { log.push(`IP check error: ${e.message}`); }
+    } catch(e) { log.push(`IP error: ${e.message}`); }
 
-    // 2. Homepage + CSRF
     let csrf = '';
     try {
       const r = await fetchUrl('https://www.instagram.com/', {
@@ -130,12 +121,10 @@ const server = http.createServer(async (req, res) => {
 
     await new Promise(r => setTimeout(r, 1000 + Math.random() * 1000));
 
-    // 3. API call
     try {
       const cookies = session
         ? `csrftoken=${csrf}; sessionid=${session}`
         : `csrftoken=${csrf}`;
-
       log.push(`Session: ${session ? session.substring(0, 15) + '...' : 'NOT SET'}`);
 
       const r = await fetchUrl(
@@ -161,30 +150,16 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
-  // ── PROFILE ──────────────────────────────────────────────────
   res.setHeader('Content-Type', 'application/json');
   const key      = urlObj.searchParams.get('key');
   const username = (urlObj.searchParams.get('u') || '').replace(/[^a-zA-Z0-9._]/g, '');
 
-  if (key !== SECRET_KEY) {
-    res.writeHead(401);
-    res.end(JSON.stringify({ error: 'Unauthorized' }));
-    return;
-  }
-  if (!username) {
-    res.writeHead(400);
-    res.end(JSON.stringify({ error: 'No username' }));
-    return;
-  }
+  if (key !== SECRET_KEY) { res.writeHead(401); res.end(JSON.stringify({ error: 'Unauthorized' })); return; }
+  if (!username)          { res.writeHead(400); res.end(JSON.stringify({ error: 'No username' })); return; }
 
   const data = await fetchProfile(username);
-  if (data) {
-    res.writeHead(200);
-    res.end(data);
-  } else {
-    res.writeHead(503);
-    res.end(JSON.stringify({ error: 'Failed to fetch profile' }));
-  }
+  if (data) { res.writeHead(200); res.end(data); }
+  else       { res.writeHead(503); res.end(JSON.stringify({ error: 'Failed to fetch profile' })); }
 });
 
-server.listen(PORT, () => console.log(`Server running on port ${PORT} — direct IP mode`));
+server.listen(PORT, () => console.log(`Server running on port ${PORT} — IPRoyal Web Unblocker`));
