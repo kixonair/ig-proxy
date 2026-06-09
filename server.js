@@ -1,9 +1,11 @@
 const http  = require('http');
 const https = require('https');
+const { HttpsProxyAgent } = require('https-proxy-agent');
 
 const PORT       = process.env.PORT || 3000;
 const SESSION_ID = process.env.IG_SESSION_ID || '';
 const SECRET_KEY = process.env.SECRET_KEY || 'spyxsocial2024';
+const PROXY_URL  = 'http://zlctqejfresidential-rotate:nj9krjaky77g@p.webshare.io:80';
 
 const WEB_UAS = [
   'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36',
@@ -14,7 +16,8 @@ const rWeb = () => WEB_UAS[Math.floor(Math.random() * WEB_UAS.length)];
 
 function fetchUrl(url, headers) {
   return new Promise((resolve, reject) => {
-    const req = https.get(url, { headers }, (res) => {
+    const agent = new HttpsProxyAgent(PROXY_URL);
+    const req = https.get(url, { agent, headers }, (res) => {
       let data = '';
       res.on('data', chunk => data += chunk);
       res.on('end', () => resolve({ status: res.statusCode, body: data, headers: res.headers }));
@@ -26,7 +29,6 @@ function fetchUrl(url, headers) {
 
 async function fetchProfile(username) {
   const session = SESSION_ID ? decodeURIComponent(SESSION_ID) : '';
-
   try {
     const home = await fetchUrl('https://www.instagram.com/', {
       'User-Agent': rWeb(),
@@ -57,9 +59,9 @@ async function fetchProfile(username) {
       const json = JSON.parse(r.body);
       if (json?.data?.user) return r.body;
     }
-    console.log(`fetchProfile HTTP ${r.status} for ${username}`);
+    console.log(`HTTP ${r.status} for ${username}: ${r.body.substring(0,100)}`);
   } catch(e) {
-    console.log('fetchProfile error:', e.message);
+    console.log('Error:', e.message);
   }
   return null;
 }
@@ -80,8 +82,8 @@ const server = http.createServer(async (req, res) => {
     const log = [];
     try {
       const r = await fetchUrl('https://api.ipify.org?format=json', { 'User-Agent': 'test' });
-      log.push(`Server IP: ${r.body} (HTTP ${r.status})`);
-    } catch(e) { log.push(`IP check error: ${e.message}`); }
+      log.push(`IP via proxy: ${r.body} (HTTP ${r.status})`);
+    } catch(e) { log.push(`Proxy error: ${e.message}`); }
     try {
       const r = await fetchUrl('https://www.instagram.com/', { 'User-Agent': rWeb(), 'Accept': 'text/html' });
       const csrf = (r.headers['set-cookie'] || []).join(';').match(/csrftoken=([^;,\s]+)/)?.[1];
@@ -96,7 +98,7 @@ const server = http.createServer(async (req, res) => {
           ...(session ? { 'Cookie': `sessionid=${session}` } : {}) }
       );
       log.push(`Instagram API: HTTP ${r.status}`);
-      log.push(`Response: ${r.body.substring(0, 200)}`);
+      log.push(`Response: ${r.body.substring(0, 300)}`);
     } catch(e) { log.push(`API error: ${e.message}`); }
     res.writeHead(200);
     res.end(log.join('\n'));
