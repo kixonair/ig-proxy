@@ -4,17 +4,19 @@ const { HttpsProxyAgent } = require('https-proxy-agent');
 
 const PORT       = process.env.PORT || 3000;
 const SESSION_ID = process.env.IG_SESSION_ID || '';
-const PROXY_URL  = 'http://zlctqejfresidential-rotate:nj9krjaky77g@p.webshare.io:80';
 const SECRET_KEY = process.env.SECRET_KEY || 'spyxsocial2024';
-const SESSION_ID = process.env.IG_SESSION_ID || '';
+const PROXY_URL  = 'http://zlctqejfresidential-rotate:nj9krjaky77g@p.webshare.io:80';
 
-function randomProxy() {
-  return PROXY_URL;
-}
+const WEB_UAS = [
+  'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36',
+  'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+  'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:125.0) Gecko/20100101 Firefox/125.0',
+];
+const rWeb = () => WEB_UAS[Math.floor(Math.random() * WEB_UAS.length)];
 
 function fetchUrl(url, headers) {
   return new Promise((resolve, reject) => {
-    const agent = new HttpsProxyAgent(randomProxy());
+    const agent = new HttpsProxyAgent(PROXY_URL);
     const req = https.get(url, { agent, headers }, (res) => {
       let data = '';
       res.on('data', chunk => data += chunk);
@@ -25,24 +27,16 @@ function fetchUrl(url, headers) {
   });
 }
 
-const WEB_UAS = [
-  'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36',
-  'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
-];
-const rWeb = () => WEB_UAS[Math.floor(Math.random() * WEB_UAS.length)];
-
 async function fetchProfile(username) {
   const session = SESSION_ID ? decodeURIComponent(SESSION_ID) : '';
 
-  // Method 1: Web API with CSRF + session via proxy
   try {
     const home = await fetchUrl('https://www.instagram.com/', {
       'User-Agent': rWeb(),
-      'Accept': 'text/html,application/xhtml+xml',
+      'Accept': 'text/html',
       'Accept-Language': 'en-US,en;q=0.9',
       ...(session ? { 'Cookie': `sessionid=${session}` } : {}),
     });
-
     const setCookie = home.headers['set-cookie'] || [];
     const cookieStr = Array.isArray(setCookie) ? setCookie.join('; ') : String(setCookie);
     const csrf = cookieStr.match(/csrftoken=([^;,\s]+)/)?.[1] || 'csrf';
@@ -66,19 +60,17 @@ async function fetchProfile(username) {
       const json = JSON.parse(r.body);
       if (json?.data?.user) return r.body;
     }
+    console.log(`fetchProfile failed: HTTP ${r.status} for ${username}`);
   } catch(e) {
-    console.log('Method1 error:', e.message);
+    console.log('fetchProfile error:', e.message);
   }
-
   return null;
 }
 
 const server = http.createServer(async (req, res) => {
   res.setHeader('Access-Control-Allow-Origin', '*');
+  const urlObj = new URL(req.url, 'http://localhost');
 
-  const urlObj = new URL(req.url, `http://localhost`);
-
-  // Health check
   if (urlObj.pathname === '/health') {
     res.setHeader('Content-Type', 'application/json');
     res.writeHead(200);
@@ -86,40 +78,28 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
-  // Debug endpoint
   if (urlObj.pathname === '/debug') {
     res.setHeader('Content-Type', 'text/plain');
     const log = [];
-    log.push('Testing proxy connection...');
     try {
       const r = await fetchUrl('https://api.ipify.org?format=json', { 'User-Agent': 'test' });
-      log.push(`Your IP via proxy: ${r.body} (HTTP ${r.status})`);
-    } catch(e) { log.push(`Proxy connection failed: ${e.message}`); }
-
-    log.push('Testing Instagram homepage...');
+      log.push(`IP via proxy: ${r.body} (HTTP ${r.status})`);
+    } catch(e) { log.push(`Proxy error: ${e.message}`); }
     try {
       const r = await fetchUrl('https://www.instagram.com/', { 'User-Agent': rWeb(), 'Accept': 'text/html' });
       const csrf = (r.headers['set-cookie'] || []).join(';').match(/csrftoken=([^;,\s]+)/)?.[1];
       log.push(`Instagram homepage: HTTP ${r.status}, csrf: ${csrf || 'NOT FOUND'}`);
-    } catch(e) { log.push(`Instagram homepage failed: ${e.message}`); }
-
-    log.push('Testing Instagram API...');
+    } catch(e) { log.push(`Homepage error: ${e.message}`); }
     try {
       const session = SESSION_ID ? decodeURIComponent(SESSION_ID) : '';
       const r = await fetchUrl(
         'https://www.instagram.com/api/v1/users/web_profile_info/?username=cristiano',
-        {
-          'User-Agent': rWeb(),
-          'x-ig-app-id': '936619743392459',
-          'x-requested-with': 'XMLHttpRequest',
-          'Accept': '*/*',
-          ...(session ? { 'Cookie': `sessionid=${session}` } : {}),
-        }
+        { 'User-Agent': rWeb(), 'x-ig-app-id': '936619743392459', 'x-requested-with': 'XMLHttpRequest', 'Accept': '*/*',
+          ...(session ? { 'Cookie': `sessionid=${session}` } : {}) }
       );
       log.push(`Instagram API: HTTP ${r.status}`);
-      log.push(`Response preview: ${r.body.substring(0, 200)}`);
-    } catch(e) { log.push(`Instagram API failed: ${e.message}`); }
-
+      log.push(`Response: ${r.body.substring(0, 200)}`);
+    } catch(e) { log.push(`API error: ${e.message}`); }
     res.writeHead(200);
     res.end(log.join('\n'));
     return;
