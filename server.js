@@ -47,7 +47,6 @@ async function fetchProfile(username) {
     const csrf = cookieStr.match(/csrftoken=([^;,\s]+)/)?.[1] || 'csrf';
     const cookies = session ? `csrftoken=${csrf}; sessionid=${session}` : `csrftoken=${csrf}`;
 
-    // Small delay between homepage and API call
     await new Promise(r => setTimeout(r, 1000 + Math.random() * 1000));
 
     const r = await fetchUrl(
@@ -68,7 +67,7 @@ async function fetchProfile(username) {
       const json = JSON.parse(r.body);
       if (json?.data?.user) return r.body;
     }
-    console.log(`HTTP ${r.status} for ${username}: ${r.body.substring(0,100)}`);
+    console.log(`HTTP ${r.status} for ${username}: ${r.body.substring(0, 100)}`);
   } catch(e) {
     console.log('Error:', e.message);
   }
@@ -89,32 +88,32 @@ const server = http.createServer(async (req, res) => {
   if (urlObj.pathname === '/debug') {
     res.setHeader('Content-Type', 'text/plain');
     const log = [];
+    const session = SESSION_ID ? decodeURIComponent(SESSION_ID) : '';
 
-    // 1. Check outbound IP
+    // 1. Check outbound IP (default rotating proxy)
     try {
       const r = await fetchUrl('https://api.ipify.org?format=json', { 'User-Agent': 'test' });
       log.push(`Server IP: ${r.body} (HTTP ${r.status})`);
     } catch(e) { log.push(`Proxy error: ${e.message}`); }
 
-    // 2. Fetch homepage + CSRF
+    // 2. Fetch homepage + CSRF using sticky debug proxy
+    const debugProxy = `http://zlctqejfresidential-session-debug:nj9krjaky77g@p.webshare.io:80`;
     let csrf = '';
     try {
       const r = await fetchUrl('https://www.instagram.com/', {
         'User-Agent': rWeb(),
         'Accept': 'text/html',
         'Accept-Language': 'en-US,en;q=0.9',
-      });
+      }, debugProxy);
       const cookieStr = (r.headers['set-cookie'] || []).join('; ');
       csrf = cookieStr.match(/csrftoken=([^;,\s]+)/)?.[1] || '';
       log.push(`Instagram homepage: HTTP ${r.status}, csrf: ${csrf || 'NOT FOUND'}`);
     } catch(e) { log.push(`Homepage error: ${e.message}`); }
 
-    // 3. Small delay before API call
     await new Promise(r => setTimeout(r, 1000 + Math.random() * 1000));
 
-    // 4. API call with proper headers + session + csrf
+    // 3. Test single sticky debug proxy
     try {
-      const session = SESSION_ID ? decodeURIComponent(SESSION_ID) : '';
       const cookies = session
         ? `csrftoken=${csrf}; sessionid=${session}`
         : `csrftoken=${csrf}`;
@@ -134,11 +133,53 @@ const server = http.createServer(async (req, res) => {
           'Accept-Language': 'en-US,en;q=0.9',
           'Referer': 'https://www.instagram.com/cristiano/',
           'Origin': 'https://www.instagram.com',
-        }
+        }, debugProxy
       );
-      log.push(`Instagram API: HTTP ${r.status}`);
+      log.push(`Instagram API (debug proxy): HTTP ${r.status}`);
       log.push(`Response: ${r.body.substring(0, 300)}`);
     } catch(e) { log.push(`API error: ${e.message}`); }
+
+    log.push('');
+    log.push('--- Testing 3 different proxy sessions ---');
+
+    // 4. Test 3 different sticky proxy sessions
+    for (let i = 0; i < 3; i++) {
+      const testProxy = `http://zlctqejfresidential-session-test${i}:nj9krjaky77g@p.webshare.io:80`;
+      try {
+        const ipR = await fetchUrl('https://api.ipify.org?format=json', { 'User-Agent': 'test' }, testProxy);
+
+        // fetch fresh csrf for this proxy session
+        const homeR = await fetchUrl('https://www.instagram.com/', {
+          'User-Agent': rWeb(),
+          'Accept': 'text/html',
+          'Accept-Language': 'en-US,en;q=0.9',
+        }, testProxy);
+        const testCookieStr = (homeR.headers['set-cookie'] || []).join('; ');
+        const testCsrf = testCookieStr.match(/csrftoken=([^;,\s]+)/)?.[1] || '';
+        const testCookies = session
+          ? `csrftoken=${testCsrf}; sessionid=${session}`
+          : `csrftoken=${testCsrf}`;
+
+        await new Promise(r => setTimeout(r, 500 + Math.random() * 500));
+
+        const igR = await fetchUrl(
+          'https://www.instagram.com/api/v1/users/web_profile_info/?username=cristiano',
+          {
+            'User-Agent': rWeb(),
+            'x-ig-app-id': '936619743392459',
+            'x-csrftoken': testCsrf,
+            'x-requested-with': 'XMLHttpRequest',
+            'Cookie': testCookies,
+            'Accept': '*/*',
+            'Accept-Language': 'en-US,en;q=0.9',
+            'Referer': 'https://www.instagram.com/cristiano/',
+            'Origin': 'https://www.instagram.com',
+          }, testProxy
+        );
+        log.push(`[test${i}] IP: ${ipR.body} → Instagram: HTTP ${igR.status} | ${igR.body.substring(0, 100)}`);
+      } catch(e) { log.push(`[test${i}] Error: ${e.message}`); }
+      await new Promise(r => setTimeout(r, 800));
+    }
 
     res.writeHead(200);
     res.end(log.join('\n'));
