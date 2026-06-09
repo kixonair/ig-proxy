@@ -134,8 +134,9 @@ const server = http.createServer(async (req, res) => {
   // ── IMAGE PROXY ──────────────────────────────────────────────
   if (urlObj.pathname === '/img') {
     const username = (urlObj.searchParams.get('u') || '').replace(/[^a-zA-Z0-9._]/g, '');
-    if (!username) { res.writeHead(400); res.end(); return; }
+    if (!username) { res.writeHead(404); res.end(); return; }
 
+    // check cache first
     const cachedImg = imgCache.get(username);
     if (cachedImg && Date.now() - cachedImg.ts < IMG_TTL) {
       res.setHeader('Content-Type', cachedImg.contentType);
@@ -143,6 +144,7 @@ const server = http.createServer(async (req, res) => {
       res.writeHead(200); res.end(cachedImg.buffer); return;
     }
 
+    // get pic URL from profile
     let picUrl = null;
     const prof = await fetchProfile(username);
     if (prof) {
@@ -154,19 +156,37 @@ const server = http.createServer(async (req, res) => {
     }
     if (!picUrl) { res.writeHead(404); res.end(); return; }
 
+    // fetch image directly with https (no proxy needed - CDN is public)
     try {
-      const img = await fetchViaProxy(picUrl, {
-        'User-Agent': rWeb(),
-        'Referer': 'https://www.instagram.com/',
-        'Accept': 'image/webp,image/apng,image/*,*/*;q=0.8',
+      const imgUrl = new URL(picUrl);
+      const imgReq = https.get({
+        hostname: imgUrl.hostname,
+        path: imgUrl.pathname + imgUrl.search,
+        headers: {
+          'User-Agent': rWeb(),
+          'Referer': 'https://www.instagram.com/',
+          'Accept': 'image/webp,image/apng,image/*,*/*;q=0.8',
+        },
+        rejectUnauthorized: false,
+      }, (imgRes) => {
+        const chunks = [];
+        imgRes.on('data', c => chunks.push(c));
+        imgRes.on('end', () => {
+          if (imgRes.statusCode === 200) {
+            const ct = imgRes.headers['content-type'] || 'image/jpeg';
+            const buf = Buffer.concat(chunks);
+            imgCache.set(username, { buffer: buf, contentType: ct, ts: Date.now() });
+            res.setHeader('Content-Type', ct);
+            res.setHeader('Cache-Control', 'public, max-age=604800');
+            res.writeHead(200); res.end(buf);
+          } else {
+            res.writeHead(imgRes.statusCode || 502); res.end();
+          }
+        });
       });
-      if (img.status === 200) {
-        const ct = img.headers['content-type'] || 'image/jpeg';
-        imgCache.set(username, { buffer: img.rawBody, contentType: ct, ts: Date.now() });
-        res.setHeader('Content-Type', ct);
-        res.setHeader('Cache-Control', 'public, max-age=604800');
-        res.writeHead(200); res.end(img.rawBody); return;
-      }
+      imgReq.on('error', (e) => { console.log('Image error:', e.message); res.writeHead(502); res.end(); });
+      imgReq.setTimeout(10000, () => { imgReq.destroy(); res.writeHead(504); res.end(); });
+      return;
     } catch(e) { console.log('Image error:', e.message); }
     res.writeHead(502); res.end(); return;
   }
