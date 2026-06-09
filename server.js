@@ -3,6 +3,7 @@ const https = require('https');
 const { HttpsProxyAgent } = require('https-proxy-agent');
 
 process.env.NODE_TLS_REJECT_UNAUTHORIZED = '0';
+
 const PORT       = process.env.PORT || 3000;
 const SESSION_ID = process.env.IG_SESSION_ID || '';
 const SECRET_KEY = process.env.SECRET_KEY || 'spyxsocial2024';
@@ -14,16 +15,31 @@ const WEB_UAS = [
   'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36',
   'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
   'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:125.0) Gecko/20100101 Firefox/125.0',
-  'Mozilla/5.0 (iPhone; CPU iPhone OS 17_4 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.4 Mobile/15E148 Safari/604.1',
-  'Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Mobile Safari/537.36',
 ];
 const rWeb = () => WEB_UAS[Math.floor(Math.random() * WEB_UAS.length)];
 
 // Simple in-memory cache
 const profileCache = new Map();
 const imgCache     = new Map();
-const CACHE_TTL    = 6 * 60 * 60 * 1000; // 6 hours
-const IMG_TTL      = 7 * 24 * 60 * 60 * 1000; // 7 days
+const CACHE_TTL    = 6 * 60 * 60 * 1000;
+const IMG_TTL      = 7 * 24 * 60 * 60 * 1000;
+
+function extractJson(body) {
+  // IPRoyal Web Unblocker wraps response in <pre> tags sometimes
+  // Try direct parse first
+  try { return JSON.parse(body); } catch(_) {}
+  // Try extracting from <pre> tags
+  const match = body.match(/<pre[^>]*>([\s\S]*?)<\/pre>/i);
+  if (match) {
+    try { return JSON.parse(match[1]); } catch(_) {}
+  }
+  // Try extracting raw JSON from body
+  const jsonMatch = body.match(/(\{[\s\S]*\})/);
+  if (jsonMatch) {
+    try { return JSON.parse(jsonMatch[1]); } catch(_) {}
+  }
+  return null;
+}
 
 function fetchUrl(url, headers) {
   return new Promise((resolve, reject) => {
@@ -34,7 +50,6 @@ function fetchUrl(url, headers) {
       res.on('end', () => resolve({
         status: res.statusCode,
         body: Buffer.concat(chunks).toString('utf8'),
-        rawBody: Buffer.concat(chunks),
         headers: res.headers
       }));
     });
@@ -65,7 +80,7 @@ function fetchImage(url) {
 }
 
 async function fetchProfile(username) {
-  // check cache first
+  // check cache
   const cached = profileCache.get(username);
   if (cached && Date.now() - cached.ts < CACHE_TTL) return cached.data;
 
@@ -73,41 +88,29 @@ async function fetchProfile(username) {
 
   for (let attempt = 0; attempt < 3; attempt++) {
     try {
-      const home = await fetchUrl('https://www.instagram.com/', {
-        'User-Agent': rWeb(),
-        'Accept': 'text/html',
-        'Accept-Language': 'en-US,en;q=0.9',
-        ...(session ? { 'Cookie': `sessionid=${session}` } : {}),
-      });
-
-      const setCookie = home.headers['set-cookie'] || [];
-      const cookieStr = Array.isArray(setCookie) ? setCookie.join('; ') : String(setCookie);
-      const csrf = cookieStr.match(/csrftoken=([^;,\s]+)/)?.[1] || '';
-      if (!csrf) { console.log(`No CSRF attempt ${attempt + 1}`); continue; }
-      const cookies = session ? `csrftoken=${csrf}; sessionid=${session}` : `csrftoken=${csrf}`;
-
-      await new Promise(r => setTimeout(r, 1000 + Math.random() * 1000));
-
+      // IPRoyal Web Unblocker handles CSRF automatically
+      // Just hit the API directly — unblocker manages cookies/headers
       const r = await fetchUrl(
         `https://www.instagram.com/api/v1/users/web_profile_info/?username=${encodeURIComponent(username)}`,
         {
           'User-Agent': rWeb(),
           'x-ig-app-id': '936619743392459',
-          'x-csrftoken': csrf,
           'x-requested-with': 'XMLHttpRequest',
-          'Cookie': cookies,
           'Accept': '*/*',
           'Accept-Language': 'en-US,en;q=0.9',
           'Referer': `https://www.instagram.com/${username}/`,
           'Origin': 'https://www.instagram.com',
+          ...(session ? { 'Cookie': `sessionid=${session}` } : {}),
         }
       );
 
       if (r.status === 200) {
-        const json = JSON.parse(r.body);
+        const json = extractJson(r.body);
         if (json?.data?.user) {
-          profileCache.set(username, { data: r.body, ts: Date.now() });
-          return r.body;
+          // normalize to clean JSON string
+          const clean = JSON.stringify(json);
+          profileCache.set(username, { data: clean, ts: Date.now() });
+          return clean;
         }
       }
 
@@ -132,7 +135,6 @@ const server = http.createServer(async (req, res) => {
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Access-Control-Allow-Methods', 'GET, OPTIONS');
   res.setHeader('Access-Control-Allow-Headers', '*');
-
   if (req.method === 'OPTIONS') { res.writeHead(200); res.end(); return; }
 
   const urlObj = new URL(req.url, 'http://localhost');
@@ -155,7 +157,6 @@ const server = http.createServer(async (req, res) => {
     const username = (urlObj.searchParams.get('u') || '').replace(/[^a-zA-Z0-9._]/g, '');
     if (!username) { res.writeHead(400); res.end(); return; }
 
-    // check image cache
     const cachedImg = imgCache.get(username);
     if (cachedImg && Date.now() - cachedImg.ts < IMG_TTL) {
       res.setHeader('Content-Type', cachedImg.contentType);
@@ -165,7 +166,6 @@ const server = http.createServer(async (req, res) => {
       return;
     }
 
-    // get pic URL from profile
     let picUrl = null;
     const prof = await fetchProfile(username);
     if (prof) {
@@ -188,7 +188,7 @@ const server = http.createServer(async (req, res) => {
         res.end(img.buffer);
         return;
       }
-    } catch(e) { console.log('Image fetch error:', e.message); }
+    } catch(e) { console.log('Image error:', e.message); }
 
     res.writeHead(502); res.end();
     return;
@@ -205,48 +205,37 @@ const server = http.createServer(async (req, res) => {
       log.push(`Outbound IP: ${r.body}`);
     } catch(e) { log.push(`IP error: ${e.message}`); }
 
-    let csrf = '';
-    try {
-      const r = await fetchUrl('https://www.instagram.com/', {
-        'User-Agent': rWeb(),
-        'Accept': 'text/html',
-        'Accept-Language': 'en-US,en;q=0.9',
-      });
-      const cookieStr = (r.headers['set-cookie'] || []).join('; ');
-      csrf = cookieStr.match(/csrftoken=([^;,\s]+)/)?.[1] || '';
-      log.push(`Instagram homepage: HTTP ${r.status}, csrf: ${csrf || 'NOT FOUND'}`);
-    } catch(e) { log.push(`Homepage error: ${e.message}`); }
-
-    await new Promise(r => setTimeout(r, 1000));
+    log.push(`Session: ${session ? session.substring(0, 15) + '...' : 'NOT SET'}`);
+    log.push('');
 
     try {
-      const cookies = session
-        ? `csrftoken=${csrf}; sessionid=${session}`
-        : `csrftoken=${csrf}`;
-      log.push(`Session: ${session ? session.substring(0, 15) + '...' : 'NOT SET'}`);
-
       const r = await fetchUrl(
         'https://www.instagram.com/api/v1/users/web_profile_info/?username=cristiano',
         {
           'User-Agent': rWeb(),
           'x-ig-app-id': '936619743392459',
-          'x-csrftoken': csrf,
           'x-requested-with': 'XMLHttpRequest',
-          'Cookie': cookies,
           'Accept': '*/*',
           'Accept-Language': 'en-US,en;q=0.9',
           'Referer': 'https://www.instagram.com/cristiano/',
           'Origin': 'https://www.instagram.com',
+          ...(session ? { 'Cookie': `sessionid=${session}` } : {}),
         }
       );
       log.push(`Instagram API: HTTP ${r.status}`);
-      try {
-        const json = JSON.parse(r.body);
-        const user = json?.data?.user;
-        log.push(`Username: ${user?.username || 'N/A'}`);
-        log.push(`Full name: ${user?.full_name || 'N/A'}`);
-        log.push(`Followers: ${user?.edge_followed_by?.count ?? 'N/A'}`);
-      } catch(_) { log.push(`Response: ${r.body.substring(0, 300)}`); }
+      const json = extractJson(r.body);
+      if (json?.data?.user) {
+        const u = json.data.user;
+        log.push(`Username: ${u.username}`);
+        log.push(`Full name: ${u.full_name}`);
+        log.push(`Followers: ${u.edge_followed_by?.count ?? u.follower_count ?? 'N/A'}`);
+        log.push(`Following: ${u.edge_follow?.count ?? u.following_count ?? 'N/A'}`);
+        log.push(`Posts: ${u.edge_owner_to_timeline_media?.count ?? u.media_count ?? 'N/A'}`);
+        log.push(`Bio: ${u.biography?.substring(0, 80) || 'none'}`);
+        log.push('✓ WORKING PERFECTLY');
+      } else {
+        log.push(`Response: ${r.body.substring(0, 300)}`);
+      }
     } catch(e) { log.push(`API error: ${e.message}`); }
 
     res.writeHead(200);
