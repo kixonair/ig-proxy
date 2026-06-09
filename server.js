@@ -1,15 +1,9 @@
 const http  = require('http');
 const https = require('https');
-const { HttpsProxyAgent } = require('https-proxy-agent');
-
-// Required for IPRoyal Web Unblocker MITM SSL
-process.env.NODE_TLS_REJECT_UNAUTHORIZED = '0';
 
 const PORT       = process.env.PORT || 3000;
 const SESSION_ID = process.env.IG_SESSION_ID || '';
 const SECRET_KEY = process.env.SECRET_KEY || 'spyxsocial2024';
-
-const PROXY_URL  = 'http://Cb6Vso1398593:1lWNf7Wh8GCIEVNS@unblocker.iproyal.com:12323';
 
 const WEB_UAS = [
   'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36',
@@ -23,19 +17,11 @@ const imgCache     = new Map();
 const CACHE_TTL    = 6 * 60 * 60 * 1000;
 const IMG_TTL      = 7 * 24 * 60 * 60 * 1000;
 
-// Use Node 18+ built-in fetch with proxy agent
-function makeAgent() {
-  return new HttpsProxyAgent(PROXY_URL, { rejectUnauthorized: false });
-}
-
-function fetchViaProxy(url, headers = {}) {
+function fetchUrl(url, headers) {
   return new Promise((resolve, reject) => {
-    const agent = makeAgent();
-    const reqHeaders = { 'User-Agent': rWeb(), ...headers };
-    const req = https.get(url, { agent, headers: reqHeaders }, (res) => {
-      // follow redirects
+    const req = https.get(url, { headers }, (res) => {
       if ((res.statusCode === 301 || res.statusCode === 302) && res.headers.location) {
-        return fetchViaProxy(res.headers.location, headers).then(resolve).catch(reject);
+        return fetchUrl(res.headers.location, headers).then(resolve).catch(reject);
       }
       const chunks = [];
       res.on('data', c => chunks.push(c));
@@ -46,28 +32,9 @@ function fetchViaProxy(url, headers = {}) {
         resHeaders: res.headers,
       }));
     });
-    req.setTimeout(25000, () => { req.destroy(); reject(new Error('timeout')); });
+    req.setTimeout(20000, () => { req.destroy(); reject(new Error('timeout')); });
     req.on('error', reject);
     req.end();
-  });
-}
-
-function fetchImageDirect(url) {
-  return new Promise((resolve, reject) => {
-    const req = https.get(url, {
-      rejectUnauthorized: false,
-      headers: { 'User-Agent': rWeb(), 'Referer': 'https://www.instagram.com/' },
-    }, (res) => {
-      const chunks = [];
-      res.on('data', c => chunks.push(c));
-      res.on('end', () => resolve({
-        status: res.statusCode,
-        buffer: Buffer.concat(chunks),
-        contentType: res.headers['content-type'] || 'image/jpeg',
-      }));
-    });
-    req.setTimeout(10000, () => { req.destroy(); reject(new Error('timeout')); });
-    req.on('error', reject);
   });
 }
 
@@ -88,16 +55,32 @@ async function fetchProfile(username) {
 
   for (let attempt = 0; attempt < 3; attempt++) {
     try {
-      const r = await fetchViaProxy(
+      // Step 1: get CSRF from homepage
+      const home = await fetchUrl('https://www.instagram.com/', {
+        'User-Agent': rWeb(),
+        'Accept': 'text/html',
+        'Accept-Language': 'en-US,en;q=0.9',
+        ...(session ? { 'Cookie': `sessionid=${session}` } : {}),
+      });
+      const cookieStr = (home.resHeaders['set-cookie'] || []).join('; ');
+      const csrf = cookieStr.match(/csrftoken=([^;,\s]+)/)?.[1] || 'csrf';
+      const cookies = session ? `csrftoken=${csrf}; sessionid=${session}` : `csrftoken=${csrf}`;
+
+      await new Promise(r => setTimeout(r, 800 + Math.random() * 800));
+
+      // Step 2: hit API
+      const r = await fetchUrl(
         `https://www.instagram.com/api/v1/users/web_profile_info/?username=${encodeURIComponent(username)}`,
         {
+          'User-Agent': rWeb(),
           'x-ig-app-id': '936619743392459',
+          'x-csrftoken': csrf,
           'x-requested-with': 'XMLHttpRequest',
+          'Cookie': cookies,
           'Accept': '*/*',
           'Accept-Language': 'en-US,en;q=0.9',
           'Referer': `https://www.instagram.com/${username}/`,
           'Origin': 'https://www.instagram.com',
-          ...(session ? { 'Cookie': `sessionid=${session}` } : {}),
         }
       );
 
@@ -111,7 +94,7 @@ async function fetchProfile(username) {
       }
 
       if (r.status === 429) {
-        const wait = (attempt + 1) * 3000 + Math.random() * 2000;
+        const wait = (attempt + 1) * 4000 + Math.random() * 2000;
         console.log(`429 attempt ${attempt + 1}, waiting ${Math.round(wait/1000)}s`);
         await new Promise(r => setTimeout(r, wait));
         continue;
@@ -163,12 +146,17 @@ const server = http.createServer(async (req, res) => {
     if (!picUrl) { res.writeHead(404); res.end(); return; }
 
     try {
-      const img = await fetchImageDirect(picUrl);
+      const img = await fetchUrl(picUrl, {
+        'User-Agent': rWeb(),
+        'Referer': 'https://www.instagram.com/',
+        'Accept': 'image/webp,image/apng,image/*,*/*;q=0.8',
+      });
       if (img.status === 200) {
-        imgCache.set(username, { buffer: img.buffer, contentType: img.contentType, ts: Date.now() });
-        res.setHeader('Content-Type', img.contentType);
+        const ct = img.resHeaders['content-type'] || 'image/jpeg';
+        imgCache.set(username, { buffer: img.rawBody, contentType: ct, ts: Date.now() });
+        res.setHeader('Content-Type', ct);
         res.setHeader('Cache-Control', 'public, max-age=604800');
-        res.writeHead(200); res.end(img.buffer); return;
+        res.writeHead(200); res.end(img.rawBody); return;
       }
     } catch(e) { console.log('Image error:', e.message); }
     res.writeHead(502); res.end(); return;
@@ -178,23 +166,38 @@ const server = http.createServer(async (req, res) => {
     res.setHeader('Content-Type', 'text/plain');
     const log = [];
     const session = SESSION_ID ? decodeURIComponent(SESSION_ID) : '';
+
     try {
-      const r = await fetchViaProxy('https://api.ipify.org?format=json');
+      const r = await fetchUrl('https://api.ipify.org?format=json', { 'User-Agent': 'test' });
       log.push(`Outbound IP: ${r.body}`);
     } catch(e) { log.push(`IP error: ${e.message}`); }
+
     log.push(`Session: ${session ? session.substring(0,15)+'...' : 'NOT SET'}`);
     log.push('');
+
     try {
-      const r = await fetchViaProxy(
+      const home = await fetchUrl('https://www.instagram.com/', {
+        'User-Agent': rWeb(), 'Accept': 'text/html', 'Accept-Language': 'en-US,en;q=0.9',
+      });
+      const cookieStr = (home.resHeaders['set-cookie'] || []).join('; ');
+      const csrf = cookieStr.match(/csrftoken=([^;,\s]+)/)?.[1] || '';
+      const cookies = session ? `csrftoken=${csrf}; sessionid=${session}` : `csrftoken=${csrf}`;
+      log.push(`Homepage: HTTP ${home.status}, csrf: ${csrf || 'NOT FOUND'}`);
+
+      await new Promise(r => setTimeout(r, 800));
+
+      const r = await fetchUrl(
         'https://www.instagram.com/api/v1/users/web_profile_info/?username=cristiano',
         {
+          'User-Agent': rWeb(),
           'x-ig-app-id': '936619743392459',
+          'x-csrftoken': csrf,
           'x-requested-with': 'XMLHttpRequest',
+          'Cookie': cookies,
           'Accept': '*/*',
           'Accept-Language': 'en-US,en;q=0.9',
           'Referer': 'https://www.instagram.com/cristiano/',
           'Origin': 'https://www.instagram.com',
-          ...(session ? { 'Cookie': `sessionid=${session}` } : {}),
         }
       );
       log.push(`Instagram API: HTTP ${r.status}`);
@@ -209,6 +212,7 @@ const server = http.createServer(async (req, res) => {
         log.push(`Response: ${r.body.substring(0, 300)}`);
       }
     } catch(e) { log.push(`API error: ${e.message}`); }
+
     res.writeHead(200); res.end(log.join('\n')); return;
   }
 
@@ -223,4 +227,4 @@ const server = http.createServer(async (req, res) => {
   else       { res.writeHead(503); res.end(JSON.stringify({ error: 'Failed to fetch profile' })); }
 });
 
-server.listen(PORT, () => console.log(`Server running on port ${PORT} — HttpsProxyAgent + SSL bypass`));
+server.listen(PORT, () => console.log(`Server running on port ${PORT} — direct no proxy`));
