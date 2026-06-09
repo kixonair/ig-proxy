@@ -1,11 +1,9 @@
 const http  = require('http');
 const https = require('https');
-const { HttpsProxyAgent } = require('https-proxy-agent');
 
 const PORT       = process.env.PORT || 3000;
 const SESSION_ID = process.env.IG_SESSION_ID || '';
 const SECRET_KEY = process.env.SECRET_KEY || 'spyxsocial2024';
-const PROXY_URL  = 'http://zlctqejfresidential-rotate:nj9krjaky77g@p.webshare.io:80';
 
 const WEB_UAS = [
   'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36',
@@ -16,8 +14,7 @@ const rWeb = () => WEB_UAS[Math.floor(Math.random() * WEB_UAS.length)];
 
 function fetchUrl(url, headers) {
   return new Promise((resolve, reject) => {
-    const agent = new HttpsProxyAgent(PROXY_URL);
-    const req = https.get(url, { agent, headers }, (res) => {
+    const req = https.get(url, { headers }, (res) => {
       let data = '';
       res.on('data', chunk => data += chunk);
       res.on('end', () => resolve({ status: res.statusCode, body: data, headers: res.headers }));
@@ -60,7 +57,7 @@ async function fetchProfile(username) {
       const json = JSON.parse(r.body);
       if (json?.data?.user) return r.body;
     }
-    console.log(`fetchProfile failed: HTTP ${r.status} for ${username}`);
+    console.log(`fetchProfile HTTP ${r.status} for ${username}`);
   } catch(e) {
     console.log('fetchProfile error:', e.message);
   }
@@ -74,7 +71,7 @@ const server = http.createServer(async (req, res) => {
   if (urlObj.pathname === '/health') {
     res.setHeader('Content-Type', 'application/json');
     res.writeHead(200);
-    res.end(JSON.stringify({ status: 'ok', proxy: 'rotating', session: SESSION_ID ? 'set' : 'missing' }));
+    res.end(JSON.stringify({ status: 'ok', session: SESSION_ID ? 'set' : 'missing' }));
     return;
   }
 
@@ -83,8 +80,8 @@ const server = http.createServer(async (req, res) => {
     const log = [];
     try {
       const r = await fetchUrl('https://api.ipify.org?format=json', { 'User-Agent': 'test' });
-      log.push(`IP via proxy: ${r.body} (HTTP ${r.status})`);
-    } catch(e) { log.push(`Proxy error: ${e.message}`); }
+      log.push(`Server IP: ${r.body} (HTTP ${r.status})`);
+    } catch(e) { log.push(`IP check error: ${e.message}`); }
     try {
       const r = await fetchUrl('https://www.instagram.com/', { 'User-Agent': rWeb(), 'Accept': 'text/html' });
       const csrf = (r.headers['set-cookie'] || []).join(';').match(/csrftoken=([^;,\s]+)/)?.[1];
@@ -94,7 +91,8 @@ const server = http.createServer(async (req, res) => {
       const session = SESSION_ID ? decodeURIComponent(SESSION_ID) : '';
       const r = await fetchUrl(
         'https://www.instagram.com/api/v1/users/web_profile_info/?username=cristiano',
-        { 'User-Agent': rWeb(), 'x-ig-app-id': '936619743392459', 'x-requested-with': 'XMLHttpRequest', 'Accept': '*/*',
+        { 'User-Agent': rWeb(), 'x-ig-app-id': '936619743392459',
+          'x-requested-with': 'XMLHttpRequest', 'Accept': '*/*',
           ...(session ? { 'Cookie': `sessionid=${session}` } : {}) }
       );
       log.push(`Instagram API: HTTP ${r.status}`);
