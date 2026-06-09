@@ -6,7 +6,6 @@
     "start": "node server.js"
   },
   "dependencies": {
-    "https-proxy-agent": "^7.0.4",
-    "undici": "^6.19.2"
+    "https-proxy-agent": "^7.0.4"
   }
 }
