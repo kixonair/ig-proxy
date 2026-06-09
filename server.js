@@ -1,13 +1,14 @@
 const http  = require('http');
 const https = require('https');
-const { HttpsProxyAgent } = require('https-proxy-agent');
+const net   = require('net');
 
 const PORT       = process.env.PORT || 3000;
 const SESSION_ID = process.env.IG_SESSION_ID || '';
 const SECRET_KEY = process.env.SECRET_KEY || 'spyxsocial2024';
 
-// IPRoyal Residential Proxy — rotating, no MITM, standard SSL
-const PROXY_URL = 'http://cL4V8BOGtvcFAyMi:kAQNBxVBdKYg9T8r@geo.iproyal.com:12321';
+const PROXY_HOST = 'geo.iproyal.com';
+const PROXY_PORT = 12321;
+const PROXY_AUTH = Buffer.from('cL4V8BOGtvcFAyMi:kAQNBxVBdKYg9T8r').toString('base64');
 
 const WEB_UAS = [
   'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36',
@@ -21,25 +22,90 @@ const imgCache     = new Map();
 const CACHE_TTL    = 6 * 60 * 60 * 1000;
 const IMG_TTL      = 7 * 24 * 60 * 60 * 1000;
 
-function fetchUrl(url, headers) {
+function fetchUrl(targetUrl, headers) {
   return new Promise((resolve, reject) => {
-    const agent = new HttpsProxyAgent(PROXY_URL);
-    const req = https.get(url, { agent, headers }, (res) => {
-      if ((res.statusCode === 301 || res.statusCode === 302) && res.headers.location) {
-        return fetchUrl(res.headers.location, headers).then(resolve).catch(reject);
-      }
-      const chunks = [];
-      res.on('data', c => chunks.push(c));
-      res.on('end', () => resolve({
-        status: res.statusCode,
-        body: Buffer.concat(chunks).toString('utf8'),
-        rawBody: Buffer.concat(chunks),
-        resHeaders: res.headers,
-      }));
+    const parsed = new URL(targetUrl);
+    const targetHost = parsed.hostname;
+    const targetPort = 443;
+    const path = parsed.pathname + (parsed.search || '');
+
+    // Step 1: Connect to proxy
+    const socket = net.connect(PROXY_PORT, PROXY_HOST, () => {
+      // Step 2: Send CONNECT request
+      socket.write(
+        `CONNECT ${targetHost}:${targetPort} HTTP/1.1\r\n` +
+        `Host: ${targetHost}:${targetPort}\r\n` +
+        `Proxy-Authorization: Basic ${PROXY_AUTH}\r\n` +
+        `Proxy-Connection: Keep-Alive\r\n\r\n`
+      );
     });
-    req.setTimeout(25000, () => { req.destroy(); reject(new Error('timeout')); });
-    req.on('error', reject);
-    req.end();
+
+    socket.setTimeout(25000, () => { socket.destroy(); reject(new Error('proxy timeout')); });
+    socket.on('error', reject);
+
+    // Step 3: Wait for 200 Connection established
+    let connectBuf = '';
+    socket.on('data', function onData(chunk) {
+      connectBuf += chunk.toString();
+      if (!connectBuf.includes('\r\n\r\n')) return;
+      socket.removeListener('data', onData);
+
+      if (!connectBuf.startsWith('HTTP/1.1 200') && !connectBuf.startsWith('HTTP/1.0 200')) {
+        socket.destroy();
+        return reject(new Error(`Proxy CONNECT failed: ${connectBuf.split('\r\n')[0]}`));
+      }
+
+      // Step 4: Upgrade to TLS
+      const tlsSocket = require('tls').connect({
+        socket,
+        servername: targetHost,
+        rejectUnauthorized: false,
+      }, () => {
+        // Step 5: Send HTTP request
+        tlsSocket.write(
+          `GET ${path} HTTP/1.1\r\n` +
+          `Host: ${targetHost}\r\n` +
+          `Connection: close\r\n` +
+          Object.entries({ 'User-Agent': rWeb(), ...headers })
+            .map(([k, v]) => `${k}: ${v}`).join('\r\n') +
+          '\r\n\r\n'
+        );
+      });
+
+      tlsSocket.on('error', reject);
+
+      // Step 6: Read response
+      const chunks = [];
+      let headersParsed = false;
+      let statusCode = 0;
+      let resHeaders = {};
+      let headerBuf = '';
+
+      tlsSocket.on('data', (chunk) => {
+        if (!headersParsed) {
+          headerBuf += chunk.toString('binary');
+          const headerEnd = headerBuf.indexOf('\r\n\r\n');
+          if (headerEnd === -1) return;
+          headersParsed = true;
+          const headerPart = headerBuf.substring(0, headerEnd);
+          const bodyPart = headerBuf.substring(headerEnd + 4);
+          const lines = headerPart.split('\r\n');
+          statusCode = parseInt(lines[0].split(' ')[1]);
+          lines.slice(1).forEach(line => {
+            const idx = line.indexOf(': ');
+            if (idx > 0) resHeaders[line.substring(0, idx).toLowerCase()] = line.substring(idx + 2);
+          });
+          if (bodyPart) chunks.push(Buffer.from(bodyPart, 'binary'));
+        } else {
+          chunks.push(chunk);
+        }
+      });
+
+      tlsSocket.on('end', () => {
+        const rawBody = Buffer.concat(chunks);
+        resolve({ status: statusCode, body: rawBody.toString('utf8'), rawBody, resHeaders });
+      });
+    });
   });
 }
 
@@ -61,12 +127,13 @@ async function fetchProfile(username) {
   for (let attempt = 0; attempt < 3; attempt++) {
     try {
       const home = await fetchUrl('https://www.instagram.com/', {
-        'User-Agent': rWeb(),
         'Accept': 'text/html',
         'Accept-Language': 'en-US,en;q=0.9',
         ...(session ? { 'Cookie': `sessionid=${session}` } : {}),
       });
-      const cookieStr = (home.resHeaders['set-cookie'] || []).join('; ');
+      const cookieStr = Array.isArray(home.resHeaders['set-cookie'])
+        ? home.resHeaders['set-cookie'].join('; ')
+        : (home.resHeaders['set-cookie'] || '');
       const csrf = cookieStr.match(/csrftoken=([^;,\s]+)/)?.[1] || 'csrf';
       const cookies = session ? `csrftoken=${csrf}; sessionid=${session}` : `csrftoken=${csrf}`;
 
@@ -75,7 +142,6 @@ async function fetchProfile(username) {
       const r = await fetchUrl(
         `https://www.instagram.com/api/v1/users/web_profile_info/?username=${encodeURIComponent(username)}`,
         {
-          'User-Agent': rWeb(),
           'x-ig-app-id': '936619743392459',
           'x-csrftoken': csrf,
           'x-requested-with': 'XMLHttpRequest',
@@ -150,9 +216,8 @@ const server = http.createServer(async (req, res) => {
 
     try {
       const img = await fetchUrl(picUrl, {
-        'User-Agent': rWeb(),
-        'Referer': 'https://www.instagram.com/',
         'Accept': 'image/webp,image/apng,image/*,*/*;q=0.8',
+        'Referer': 'https://www.instagram.com/',
       });
       if (img.status === 200) {
         const ct = img.resHeaders['content-type'] || 'image/jpeg';
@@ -169,25 +234,29 @@ const server = http.createServer(async (req, res) => {
     res.setHeader('Content-Type', 'text/plain');
     const log = [];
     const session = SESSION_ID ? decodeURIComponent(SESSION_ID) : '';
+
     try {
-      const r = await fetchUrl('https://api.ipify.org?format=json', { 'User-Agent': 'test' });
+      const r = await fetchUrl('https://api.ipify.org?format=json', {});
       log.push(`Outbound IP: ${r.body}`);
     } catch(e) { log.push(`IP error: ${e.message}`); }
+
     log.push(`Session: ${session ? session.substring(0,15)+'...' : 'NOT SET'}`);
     log.push('');
+
     try {
       const home = await fetchUrl('https://www.instagram.com/', {
-        'User-Agent': rWeb(), 'Accept': 'text/html', 'Accept-Language': 'en-US,en;q=0.9',
+        'Accept': 'text/html', 'Accept-Language': 'en-US,en;q=0.9',
       });
-      const cookieStr = (home.resHeaders['set-cookie'] || []).join('; ');
+      const cookieStr = home.resHeaders['set-cookie'] || '';
       const csrf = cookieStr.match(/csrftoken=([^;,\s]+)/)?.[1] || '';
       const cookies = session ? `csrftoken=${csrf}; sessionid=${session}` : `csrftoken=${csrf}`;
       log.push(`Homepage: HTTP ${home.status}, csrf: ${csrf || 'NOT FOUND'}`);
+
       await new Promise(r => setTimeout(r, 800));
+
       const r = await fetchUrl(
         'https://www.instagram.com/api/v1/users/web_profile_info/?username=cristiano',
         {
-          'User-Agent': rWeb(),
           'x-ig-app-id': '936619743392459',
           'x-csrftoken': csrf,
           'x-requested-with': 'XMLHttpRequest',
@@ -210,6 +279,7 @@ const server = http.createServer(async (req, res) => {
         log.push(`Response: ${r.body.substring(0, 300)}`);
       }
     } catch(e) { log.push(`API error: ${e.message}`); }
+
     res.writeHead(200); res.end(log.join('\n')); return;
   }
 
@@ -224,4 +294,4 @@ const server = http.createServer(async (req, res) => {
   else       { res.writeHead(503); res.end(JSON.stringify({ error: 'Failed to fetch profile' })); }
 });
 
-server.listen(PORT, () => console.log(`Server running on port ${PORT} — IPRoyal Residential`));
+server.listen(PORT, () => console.log(`Server running on port ${PORT} — raw CONNECT tunnel, zero dependencies`));
