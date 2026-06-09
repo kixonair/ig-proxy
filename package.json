@@ -5,5 +5,7 @@
   "scripts": {
     "start": "node server.js"
   },
-  "dependencies": {}
+  "dependencies": {
+    "https-proxy-agent": "^7.0.4"
+  }
 }
