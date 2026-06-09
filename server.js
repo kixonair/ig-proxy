@@ -1,5 +1,5 @@
-const http   = require('http');
-const https  = require('https');
+const http  = require('http');
+const https = require('https');
 const { URL } = require('url');
 
 process.env.NODE_TLS_REJECT_UNAUTHORIZED = '0';
@@ -10,7 +10,8 @@ const SECRET_KEY = process.env.SECRET_KEY || 'spyxsocial2024';
 
 const PROXY_HOST = 'unblocker.iproyal.com';
 const PROXY_PORT = 12323;
-const PROXY_AUTH = 'Cb6Vso1398593:1lWNf7Wh8GCIEVNS';
+const PROXY_USER = 'Cb6Vso1398593';
+const PROXY_PASS = '1lWNf7Wh8GCIEVNS';
 
 const WEB_UAS = [
   'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36',
@@ -24,56 +25,37 @@ const imgCache     = new Map();
 const CACHE_TTL    = 6 * 60 * 60 * 1000;
 const IMG_TTL      = 7 * 24 * 60 * 60 * 1000;
 
+// IPRoyal Web Unblocker works best with plain HTTP requests
+// It handles SSL/HTTPS on their end
 function fetchViaProxy(targetUrl, headers) {
   return new Promise((resolve, reject) => {
-    const parsed = new URL(targetUrl);
-    // connect to proxy via HTTP CONNECT tunnel
-    const connectReq = http.request({
+    const auth = Buffer.from(`${PROXY_USER}:${PROXY_PASS}`).toString('base64');
+    const options = {
       host: PROXY_HOST,
       port: PROXY_PORT,
-      method: 'CONNECT',
-      path: `${parsed.hostname}:443`,
+      method: 'GET',
+      path: targetUrl, // full URL as path for proxy
       headers: {
-        'Proxy-Authorization': 'Basic ' + Buffer.from(PROXY_AUTH).toString('base64'),
-        'Host': `${parsed.hostname}:443`,
-      }
+        ...headers,
+        'Proxy-Authorization': `Basic ${auth}`,
+        'Proxy-Connection': 'keep-alive',
+      },
+    };
+
+    const req = http.request(options, (res) => {
+      const chunks = [];
+      res.on('data', c => chunks.push(c));
+      res.on('end', () => resolve({
+        status: res.statusCode,
+        body: Buffer.concat(chunks).toString('utf8'),
+        rawBody: Buffer.concat(chunks),
+        headers: res.headers,
+      }));
     });
 
-    connectReq.setTimeout(15000, () => { connectReq.destroy(); reject(new Error('proxy connect timeout')); });
-    connectReq.on('error', reject);
-
-    connectReq.on('connect', (res, socket) => {
-      if (res.statusCode !== 200) {
-        socket.destroy();
-        return reject(new Error(`Proxy CONNECT failed: ${res.statusCode}`));
-      }
-
-      // now make HTTPS request over the tunnel
-      const req = https.request({
-        host: parsed.hostname,
-        path: parsed.pathname + (parsed.search || ''),
-        method: 'GET',
-        headers: { ...headers, 'Host': parsed.hostname },
-        socket,
-        agent: false,
-        rejectUnauthorized: false,
-      }, (response) => {
-        const chunks = [];
-        response.on('data', c => chunks.push(c));
-        response.on('end', () => resolve({
-          status: response.statusCode,
-          body: Buffer.concat(chunks).toString('utf8'),
-          rawBody: Buffer.concat(chunks),
-          headers: response.headers,
-        }));
-      });
-
-      req.setTimeout(20000, () => { req.destroy(); reject(new Error('request timeout')); });
-      req.on('error', reject);
-      req.end();
-    });
-
-    connectReq.end();
+    req.setTimeout(25000, () => { req.destroy(); reject(new Error('timeout')); });
+    req.on('error', reject);
+    req.end();
   });
 }
 
@@ -145,7 +127,7 @@ const server = http.createServer(async (req, res) => {
   if (urlObj.pathname === '/health') {
     res.setHeader('Content-Type', 'application/json');
     res.writeHead(200);
-    res.end(JSON.stringify({ status: 'ok', session: SESSION_ID ? 'set' : 'missing', proxy: 'iproyal-tunnel', cached: profileCache.size }));
+    res.end(JSON.stringify({ status: 'ok', session: SESSION_ID ? 'set' : 'missing', proxy: 'iproyal-http', cached: profileCache.size }));
     return;
   }
 
@@ -246,4 +228,4 @@ const server = http.createServer(async (req, res) => {
   else       { res.writeHead(503); res.end(JSON.stringify({ error: 'Failed to fetch profile' })); }
 });
 
-server.listen(PORT, () => console.log(`Server running on port ${PORT} — IPRoyal CONNECT tunnel`));
+server.listen(PORT, () => console.log(`Server running on port ${PORT} — IPRoyal HTTP proxy`));
