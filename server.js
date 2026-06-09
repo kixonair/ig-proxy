@@ -1,17 +1,15 @@
-const http = require('http');
+const http  = require('http');
 const https = require('https');
-const { ProxyAgent, fetch: undiciFetch } = require('undici');
+const { HttpsProxyAgent } = require('https-proxy-agent');
 
+// Required for IPRoyal Web Unblocker MITM SSL
 process.env.NODE_TLS_REJECT_UNAUTHORIZED = '0';
 
 const PORT       = process.env.PORT || 3000;
 const SESSION_ID = process.env.IG_SESSION_ID || '';
 const SECRET_KEY = process.env.SECRET_KEY || 'spyxsocial2024';
 
-const proxyAgent = new ProxyAgent({
-  uri: 'http://Cb6Vso1398593:1lWNf7Wh8GCIEVNS@unblocker.iproyal.com:12323',
-  connect: { rejectUnauthorized: false },
-});
+const PROXY_URL  = 'http://Cb6Vso1398593:1lWNf7Wh8GCIEVNS@unblocker.iproyal.com:12323';
 
 const WEB_UAS = [
   'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36',
@@ -25,23 +23,33 @@ const imgCache     = new Map();
 const CACHE_TTL    = 6 * 60 * 60 * 1000;
 const IMG_TTL      = 7 * 24 * 60 * 60 * 1000;
 
-function extractJson(body) {
-  try { return JSON.parse(body); } catch(_) {}
-  const m = body.match(/<pre[^>]*>([\s\S]*?)<\/pre>/i);
-  if (m) { try { return JSON.parse(m[1]); } catch(_) {} }
-  const j = body.match(/(\{[\s\S]*\})/);
-  if (j) { try { return JSON.parse(j[1]); } catch(_) {} }
-  return null;
+// Use Node 18+ built-in fetch with proxy agent
+function makeAgent() {
+  return new HttpsProxyAgent(PROXY_URL, { rejectUnauthorized: false });
 }
 
-async function fetchViaProxy(url, headers = {}) {
-  const res = await undiciFetch(url, {
-    dispatcher: proxyAgent,
-    redirect: 'follow',
-    headers: { 'User-Agent': rWeb(), ...headers },
+function fetchViaProxy(url, headers = {}) {
+  return new Promise((resolve, reject) => {
+    const agent = makeAgent();
+    const reqHeaders = { 'User-Agent': rWeb(), ...headers };
+    const req = https.get(url, { agent, headers: reqHeaders }, (res) => {
+      // follow redirects
+      if ((res.statusCode === 301 || res.statusCode === 302) && res.headers.location) {
+        return fetchViaProxy(res.headers.location, headers).then(resolve).catch(reject);
+      }
+      const chunks = [];
+      res.on('data', c => chunks.push(c));
+      res.on('end', () => resolve({
+        status: res.statusCode,
+        body: Buffer.concat(chunks).toString('utf8'),
+        rawBody: Buffer.concat(chunks),
+        resHeaders: res.headers,
+      }));
+    });
+    req.setTimeout(25000, () => { req.destroy(); reject(new Error('timeout')); });
+    req.on('error', reject);
+    req.end();
   });
-  const body = await res.text();
-  return { status: res.status, body };
 }
 
 function fetchImageDirect(url) {
@@ -52,11 +60,24 @@ function fetchImageDirect(url) {
     }, (res) => {
       const chunks = [];
       res.on('data', c => chunks.push(c));
-      res.on('end', () => resolve({ status: res.statusCode, buffer: Buffer.concat(chunks), contentType: res.headers['content-type'] || 'image/jpeg' }));
+      res.on('end', () => resolve({
+        status: res.statusCode,
+        buffer: Buffer.concat(chunks),
+        contentType: res.headers['content-type'] || 'image/jpeg',
+      }));
     });
     req.setTimeout(10000, () => { req.destroy(); reject(new Error('timeout')); });
     req.on('error', reject);
   });
+}
+
+function extractJson(body) {
+  try { return JSON.parse(body); } catch(_) {}
+  const m = body.match(/<pre[^>]*>([\s\S]*?)<\/pre>/i);
+  if (m) { try { return JSON.parse(m[1]); } catch(_) {} }
+  const j = body.match(/(\{[\s\S]*\})/);
+  if (j) { try { return JSON.parse(j[1]); } catch(_) {} }
+  return null;
 }
 
 async function fetchProfile(username) {
@@ -91,7 +112,7 @@ async function fetchProfile(username) {
 
       if (r.status === 429) {
         const wait = (attempt + 1) * 3000 + Math.random() * 2000;
-        console.log(`429 attempt ${attempt + 1}, waiting ${Math.round(wait / 1000)}s`);
+        console.log(`429 attempt ${attempt + 1}, waiting ${Math.round(wait/1000)}s`);
         await new Promise(r => setTimeout(r, wait));
         continue;
       }
@@ -161,7 +182,7 @@ const server = http.createServer(async (req, res) => {
       const r = await fetchViaProxy('https://api.ipify.org?format=json');
       log.push(`Outbound IP: ${r.body}`);
     } catch(e) { log.push(`IP error: ${e.message}`); }
-    log.push(`Session: ${session ? session.substring(0, 15) + '...' : 'NOT SET'}`);
+    log.push(`Session: ${session ? session.substring(0,15)+'...' : 'NOT SET'}`);
     log.push('');
     try {
       const r = await fetchViaProxy(
@@ -202,4 +223,4 @@ const server = http.createServer(async (req, res) => {
   else       { res.writeHead(503); res.end(JSON.stringify({ error: 'Failed to fetch profile' })); }
 });
 
-server.listen(PORT, () => console.log(`Server running on port ${PORT} — undici ProxyAgent`));
+server.listen(PORT, () => console.log(`Server running on port ${PORT} — HttpsProxyAgent + SSL bypass`));
