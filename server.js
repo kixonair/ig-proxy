@@ -1,6 +1,6 @@
-const http  = require('http');
-const https = require('https');
-const { HttpsProxyAgent } = require('https-proxy-agent');
+const http   = require('http');
+const https  = require('https');
+const { URL } = require('url');
 
 process.env.NODE_TLS_REJECT_UNAUTHORIZED = '0';
 
@@ -8,8 +8,9 @@ const PORT       = process.env.PORT || 3000;
 const SESSION_ID = process.env.IG_SESSION_ID || '';
 const SECRET_KEY = process.env.SECRET_KEY || 'spyxsocial2024';
 
-// IPRoyal Web Unblocker
-const PROXY_URL = 'http://Cb6Vso1398593:1lWNf7Wh8GCIEVNS@unblocker.iproyal.com:12323';
+const PROXY_HOST = 'unblocker.iproyal.com';
+const PROXY_PORT = 12323;
+const PROXY_AUTH = 'Cb6Vso1398593:1lWNf7Wh8GCIEVNS';
 
 const WEB_UAS = [
   'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36',
@@ -18,69 +19,74 @@ const WEB_UAS = [
 ];
 const rWeb = () => WEB_UAS[Math.floor(Math.random() * WEB_UAS.length)];
 
-// Simple in-memory cache
 const profileCache = new Map();
 const imgCache     = new Map();
 const CACHE_TTL    = 6 * 60 * 60 * 1000;
 const IMG_TTL      = 7 * 24 * 60 * 60 * 1000;
 
+function fetchViaProxy(targetUrl, headers) {
+  return new Promise((resolve, reject) => {
+    const parsed = new URL(targetUrl);
+    // connect to proxy via HTTP CONNECT tunnel
+    const connectReq = http.request({
+      host: PROXY_HOST,
+      port: PROXY_PORT,
+      method: 'CONNECT',
+      path: `${parsed.hostname}:443`,
+      headers: {
+        'Proxy-Authorization': 'Basic ' + Buffer.from(PROXY_AUTH).toString('base64'),
+        'Host': `${parsed.hostname}:443`,
+      }
+    });
+
+    connectReq.setTimeout(15000, () => { connectReq.destroy(); reject(new Error('proxy connect timeout')); });
+    connectReq.on('error', reject);
+
+    connectReq.on('connect', (res, socket) => {
+      if (res.statusCode !== 200) {
+        socket.destroy();
+        return reject(new Error(`Proxy CONNECT failed: ${res.statusCode}`));
+      }
+
+      // now make HTTPS request over the tunnel
+      const req = https.request({
+        host: parsed.hostname,
+        path: parsed.pathname + (parsed.search || ''),
+        method: 'GET',
+        headers: { ...headers, 'Host': parsed.hostname },
+        socket,
+        agent: false,
+        rejectUnauthorized: false,
+      }, (response) => {
+        const chunks = [];
+        response.on('data', c => chunks.push(c));
+        response.on('end', () => resolve({
+          status: response.statusCode,
+          body: Buffer.concat(chunks).toString('utf8'),
+          rawBody: Buffer.concat(chunks),
+          headers: response.headers,
+        }));
+      });
+
+      req.setTimeout(20000, () => { req.destroy(); reject(new Error('request timeout')); });
+      req.on('error', reject);
+      req.end();
+    });
+
+    connectReq.end();
+  });
+}
+
 function extractJson(body) {
-  // IPRoyal Web Unblocker wraps response in <pre> tags sometimes
-  // Try direct parse first
   try { return JSON.parse(body); } catch(_) {}
-  // Try extracting from <pre> tags
   const match = body.match(/<pre[^>]*>([\s\S]*?)<\/pre>/i);
-  if (match) {
-    try { return JSON.parse(match[1]); } catch(_) {}
-  }
-  // Try extracting raw JSON from body
+  if (match) { try { return JSON.parse(match[1]); } catch(_) {} }
   const jsonMatch = body.match(/(\{[\s\S]*\})/);
-  if (jsonMatch) {
-    try { return JSON.parse(jsonMatch[1]); } catch(_) {}
-  }
+  if (jsonMatch) { try { return JSON.parse(jsonMatch[1]); } catch(_) {} }
   return null;
 }
 
-function fetchUrl(url, headers) {
-  return new Promise((resolve, reject) => {
-    const agent = new HttpsProxyAgent(PROXY_URL, { rejectUnauthorized: false });
-    const req = https.get(url, { agent, headers }, (res) => {
-      const chunks = [];
-      res.on('data', chunk => chunks.push(chunk));
-      res.on('end', () => resolve({
-        status: res.statusCode,
-        body: Buffer.concat(chunks).toString('utf8'),
-        headers: res.headers
-      }));
-    });
-    req.on('error', reject);
-    req.setTimeout(25000, () => { req.destroy(); reject(new Error('timeout')); });
-  });
-}
-
-function fetchImage(url) {
-  return new Promise((resolve, reject) => {
-    const agent = new HttpsProxyAgent(PROXY_URL, { rejectUnauthorized: false });
-    const req = https.get(url, { agent, headers: {
-      'User-Agent': rWeb(),
-      'Referer': 'https://www.instagram.com/',
-      'Accept': 'image/webp,image/apng,image/*,*/*;q=0.8',
-    }}, (res) => {
-      const chunks = [];
-      res.on('data', chunk => chunks.push(chunk));
-      res.on('end', () => resolve({
-        status: res.statusCode,
-        buffer: Buffer.concat(chunks),
-        contentType: res.headers['content-type'] || 'image/jpeg'
-      }));
-    });
-    req.on('error', reject);
-    req.setTimeout(20000, () => { req.destroy(); reject(new Error('timeout')); });
-  });
-}
-
 async function fetchProfile(username) {
-  // check cache
   const cached = profileCache.get(username);
   if (cached && Date.now() - cached.ts < CACHE_TTL) return cached.data;
 
@@ -88,9 +94,7 @@ async function fetchProfile(username) {
 
   for (let attempt = 0; attempt < 3; attempt++) {
     try {
-      // IPRoyal Web Unblocker handles CSRF automatically
-      // Just hit the API directly — unblocker manages cookies/headers
-      const r = await fetchUrl(
+      const r = await fetchViaProxy(
         `https://www.instagram.com/api/v1/users/web_profile_info/?username=${encodeURIComponent(username)}`,
         {
           'User-Agent': rWeb(),
@@ -107,7 +111,6 @@ async function fetchProfile(username) {
       if (r.status === 200) {
         const json = extractJson(r.body);
         if (json?.data?.user) {
-          // normalize to clean JSON string
           const clean = JSON.stringify(json);
           profileCache.set(username, { data: clean, ts: Date.now() });
           return clean;
@@ -116,14 +119,13 @@ async function fetchProfile(username) {
 
       if (r.status === 429) {
         const wait = (attempt + 1) * 3000 + Math.random() * 2000;
-        console.log(`429 attempt ${attempt + 1}, waiting ${Math.round(wait/1000)}s...`);
+        console.log(`429 attempt ${attempt + 1}, waiting ${Math.round(wait/1000)}s`);
         await new Promise(r => setTimeout(r, wait));
         continue;
       }
 
-      console.log(`HTTP ${r.status} for ${username}: ${r.body.substring(0, 150)}`);
+      console.log(`HTTP ${r.status} for ${username}: ${r.body.substring(0, 120)}`);
       break;
-
     } catch(e) {
       console.log(`Error attempt ${attempt + 1}: ${e.message}`);
     }
@@ -143,12 +145,7 @@ const server = http.createServer(async (req, res) => {
   if (urlObj.pathname === '/health') {
     res.setHeader('Content-Type', 'application/json');
     res.writeHead(200);
-    res.end(JSON.stringify({
-      status: 'ok',
-      session: SESSION_ID ? 'set' : 'missing',
-      proxy: 'iproyal-unblocker',
-      cached_profiles: profileCache.size,
-    }));
+    res.end(JSON.stringify({ status: 'ok', session: SESSION_ID ? 'set' : 'missing', proxy: 'iproyal-tunnel', cached: profileCache.size }));
     return;
   }
 
@@ -161,9 +158,7 @@ const server = http.createServer(async (req, res) => {
     if (cachedImg && Date.now() - cachedImg.ts < IMG_TTL) {
       res.setHeader('Content-Type', cachedImg.contentType);
       res.setHeader('Cache-Control', 'public, max-age=604800');
-      res.writeHead(200);
-      res.end(cachedImg.buffer);
-      return;
+      res.writeHead(200); res.end(cachedImg.buffer); return;
     }
 
     let picUrl = null;
@@ -175,23 +170,23 @@ const server = http.createServer(async (req, res) => {
         picUrl = user?.profile_pic_url_hd || user?.profile_pic_url;
       } catch(_) {}
     }
-
     if (!picUrl) { res.writeHead(404); res.end(); return; }
 
     try {
-      const img = await fetchImage(picUrl);
+      const img = await fetchViaProxy(picUrl, {
+        'User-Agent': rWeb(),
+        'Referer': 'https://www.instagram.com/',
+        'Accept': 'image/webp,image/apng,image/*,*/*;q=0.8',
+      });
       if (img.status === 200) {
-        imgCache.set(username, { buffer: img.buffer, contentType: img.contentType, ts: Date.now() });
-        res.setHeader('Content-Type', img.contentType);
+        const ct = img.headers['content-type'] || 'image/jpeg';
+        imgCache.set(username, { buffer: img.rawBody, contentType: ct, ts: Date.now() });
+        res.setHeader('Content-Type', ct);
         res.setHeader('Cache-Control', 'public, max-age=604800');
-        res.writeHead(200);
-        res.end(img.buffer);
-        return;
+        res.writeHead(200); res.end(img.rawBody); return;
       }
     } catch(e) { console.log('Image error:', e.message); }
-
-    res.writeHead(502); res.end();
-    return;
+    res.writeHead(502); res.end(); return;
   }
 
   // ── DEBUG ────────────────────────────────────────────────────
@@ -201,15 +196,15 @@ const server = http.createServer(async (req, res) => {
     const session = SESSION_ID ? decodeURIComponent(SESSION_ID) : '';
 
     try {
-      const r = await fetchUrl('https://api.ipify.org?format=json', { 'User-Agent': 'test' });
+      const r = await fetchViaProxy('https://api.ipify.org?format=json', { 'User-Agent': 'test' });
       log.push(`Outbound IP: ${r.body}`);
     } catch(e) { log.push(`IP error: ${e.message}`); }
 
-    log.push(`Session: ${session ? session.substring(0, 15) + '...' : 'NOT SET'}`);
+    log.push(`Session: ${session ? session.substring(0,15)+'...' : 'NOT SET'}`);
     log.push('');
 
     try {
-      const r = await fetchUrl(
+      const r = await fetchViaProxy(
         'https://www.instagram.com/api/v1/users/web_profile_info/?username=cristiano',
         {
           'User-Agent': rWeb(),
@@ -229,18 +224,13 @@ const server = http.createServer(async (req, res) => {
         log.push(`Username: ${u.username}`);
         log.push(`Full name: ${u.full_name}`);
         log.push(`Followers: ${u.edge_followed_by?.count ?? u.follower_count ?? 'N/A'}`);
-        log.push(`Following: ${u.edge_follow?.count ?? u.following_count ?? 'N/A'}`);
-        log.push(`Posts: ${u.edge_owner_to_timeline_media?.count ?? u.media_count ?? 'N/A'}`);
-        log.push(`Bio: ${u.biography?.substring(0, 80) || 'none'}`);
-        log.push('✓ WORKING PERFECTLY');
+        log.push('✓ WORKING');
       } else {
-        log.push(`Response: ${r.body.substring(0, 300)}`);
+        log.push(`Response: ${r.body.substring(0, 200)}`);
       }
     } catch(e) { log.push(`API error: ${e.message}`); }
 
-    res.writeHead(200);
-    res.end(log.join('\n'));
-    return;
+    res.writeHead(200); res.end(log.join('\n')); return;
   }
 
   // ── PROFILE ──────────────────────────────────────────────────
@@ -256,4 +246,4 @@ const server = http.createServer(async (req, res) => {
   else       { res.writeHead(503); res.end(JSON.stringify({ error: 'Failed to fetch profile' })); }
 });
 
-server.listen(PORT, () => console.log(`Server running on port ${PORT} — IPRoyal Web Unblocker`));
+server.listen(PORT, () => console.log(`Server running on port ${PORT} — IPRoyal CONNECT tunnel`));
