@@ -1,9 +1,13 @@
 const http  = require('http');
 const https = require('https');
+const { HttpsProxyAgent } = require('https-proxy-agent');
 
 const PORT       = process.env.PORT || 3000;
 const SESSION_ID = process.env.IG_SESSION_ID || '';
 const SECRET_KEY = process.env.SECRET_KEY || 'spyxsocial2024';
+
+// IPRoyal Residential Proxy — rotating, no MITM, standard SSL
+const PROXY_URL = 'http://cL4V8BOGtvcFAyMi:kAQNBxVBdKYg9T8r@geo.iproyal.com:12321';
 
 const WEB_UAS = [
   'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36',
@@ -19,7 +23,8 @@ const IMG_TTL      = 7 * 24 * 60 * 60 * 1000;
 
 function fetchUrl(url, headers) {
   return new Promise((resolve, reject) => {
-    const req = https.get(url, { headers }, (res) => {
+    const agent = new HttpsProxyAgent(PROXY_URL);
+    const req = https.get(url, { agent, headers }, (res) => {
       if ((res.statusCode === 301 || res.statusCode === 302) && res.headers.location) {
         return fetchUrl(res.headers.location, headers).then(resolve).catch(reject);
       }
@@ -32,7 +37,7 @@ function fetchUrl(url, headers) {
         resHeaders: res.headers,
       }));
     });
-    req.setTimeout(20000, () => { req.destroy(); reject(new Error('timeout')); });
+    req.setTimeout(25000, () => { req.destroy(); reject(new Error('timeout')); });
     req.on('error', reject);
     req.end();
   });
@@ -55,7 +60,6 @@ async function fetchProfile(username) {
 
   for (let attempt = 0; attempt < 3; attempt++) {
     try {
-      // Step 1: get CSRF from homepage
       const home = await fetchUrl('https://www.instagram.com/', {
         'User-Agent': rWeb(),
         'Accept': 'text/html',
@@ -68,7 +72,6 @@ async function fetchProfile(username) {
 
       await new Promise(r => setTimeout(r, 800 + Math.random() * 800));
 
-      // Step 2: hit API
       const r = await fetchUrl(
         `https://www.instagram.com/api/v1/users/web_profile_info/?username=${encodeURIComponent(username)}`,
         {
@@ -166,15 +169,12 @@ const server = http.createServer(async (req, res) => {
     res.setHeader('Content-Type', 'text/plain');
     const log = [];
     const session = SESSION_ID ? decodeURIComponent(SESSION_ID) : '';
-
     try {
       const r = await fetchUrl('https://api.ipify.org?format=json', { 'User-Agent': 'test' });
       log.push(`Outbound IP: ${r.body}`);
     } catch(e) { log.push(`IP error: ${e.message}`); }
-
     log.push(`Session: ${session ? session.substring(0,15)+'...' : 'NOT SET'}`);
     log.push('');
-
     try {
       const home = await fetchUrl('https://www.instagram.com/', {
         'User-Agent': rWeb(), 'Accept': 'text/html', 'Accept-Language': 'en-US,en;q=0.9',
@@ -183,9 +183,7 @@ const server = http.createServer(async (req, res) => {
       const csrf = cookieStr.match(/csrftoken=([^;,\s]+)/)?.[1] || '';
       const cookies = session ? `csrftoken=${csrf}; sessionid=${session}` : `csrftoken=${csrf}`;
       log.push(`Homepage: HTTP ${home.status}, csrf: ${csrf || 'NOT FOUND'}`);
-
       await new Promise(r => setTimeout(r, 800));
-
       const r = await fetchUrl(
         'https://www.instagram.com/api/v1/users/web_profile_info/?username=cristiano',
         {
@@ -212,7 +210,6 @@ const server = http.createServer(async (req, res) => {
         log.push(`Response: ${r.body.substring(0, 300)}`);
       }
     } catch(e) { log.push(`API error: ${e.message}`); }
-
     res.writeHead(200); res.end(log.join('\n')); return;
   }
 
@@ -227,4 +224,4 @@ const server = http.createServer(async (req, res) => {
   else       { res.writeHead(503); res.end(JSON.stringify({ error: 'Failed to fetch profile' })); }
 });
 
-server.listen(PORT, () => console.log(`Server running on port ${PORT} — direct no proxy`));
+server.listen(PORT, () => console.log(`Server running on port ${PORT} — IPRoyal Residential`));
