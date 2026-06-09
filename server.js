@@ -71,12 +71,12 @@ async function fetchProfile(username) {
 
 const server = http.createServer(async (req, res) => {
   res.setHeader('Access-Control-Allow-Origin', '*');
-  res.setHeader('Content-Type', 'application/json');
 
   const urlObj = new URL(req.url, `http://localhost`);
 
   // Health check
   if (urlObj.pathname === '/health') {
+    res.setHeader('Content-Type', 'application/json');
     res.writeHead(200);
     res.end(JSON.stringify({ status: 'ok', proxy: PROXY_URL.split('@')[1], session: SESSION_ID ? 'set' : 'missing' }));
     return;
@@ -84,6 +84,7 @@ const server = http.createServer(async (req, res) => {
 
   // Debug endpoint
   if (urlObj.pathname === '/debug') {
+    res.setHeader('Content-Type', 'text/plain');
     const log = [];
     log.push('Testing proxy connection...');
     try {
@@ -116,11 +117,11 @@ const server = http.createServer(async (req, res) => {
     } catch(e) { log.push(`Instagram API failed: ${e.message}`); }
 
     res.writeHead(200);
-    res.setHeader('Content-Type', 'text/plain');
     res.end(log.join('\n'));
     return;
   }
 
+  res.setHeader('Content-Type', 'application/json');
   const key      = urlObj.searchParams.get('key');
   const username = (urlObj.searchParams.get('u') || '').replace(/[^a-zA-Z0-9._]/g, '');
 
