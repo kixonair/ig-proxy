@@ -4,13 +4,18 @@ const { HttpsProxyAgent } = require('https-proxy-agent');
 
 const PORT       = process.env.PORT || 3000;
 const SESSION_ID = process.env.IG_SESSION_ID || '';
-const PROXY_URL  = process.env.PROXY_URL || 'http://zlctqejf:nj9krjaky77g@216.98.249.90:7071';
+const PROXY_URL  = process.env.PROXY_URL || 'http://zlctqejfresidential-ca-2:nj9krjaky77g@p.webshare.io:80';
 const SECRET_KEY = process.env.SECRET_KEY || 'spyxsocial2024';
 
-const agent = new HttpsProxyAgent(PROXY_URL);
+function getProxyUrl() {
+  // Add random session to force new IP on every request
+  const session = Math.random().toString(36).substring(2, 8);
+  return PROXY_URL.replace('residential-ca-2', `residential-ca-2-session-${session}`);
+}
 
 function fetchUrl(url, headers) {
   return new Promise((resolve, reject) => {
+    const agent = new HttpsProxyAgent(getProxyUrl());
     const req = https.get(url, { agent, headers }, (res) => {
       let data = '';
       res.on('data', chunk => data += chunk);
