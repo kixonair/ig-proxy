@@ -1,6 +1,6 @@
 const http = require('http');
 const https = require('https');
-const { fetch, ProxyAgent } = require('undici');
+const { ProxyAgent, fetch: undiciFetch } = require('undici');
 
 process.env.NODE_TLS_REJECT_UNAUTHORIZED = '0';
 
@@ -8,7 +8,10 @@ const PORT       = process.env.PORT || 3000;
 const SESSION_ID = process.env.IG_SESSION_ID || '';
 const SECRET_KEY = process.env.SECRET_KEY || 'spyxsocial2024';
 
-const proxyAgent = new ProxyAgent('http://Cb6Vso1398593:1lWNf7Wh8GCIEVNS@unblocker.iproyal.com:12323');
+const proxyAgent = new ProxyAgent({
+  uri: 'http://Cb6Vso1398593:1lWNf7Wh8GCIEVNS@unblocker.iproyal.com:12323',
+  connect: { rejectUnauthorized: false },
+});
 
 const WEB_UAS = [
   'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36',
@@ -24,41 +27,35 @@ const IMG_TTL      = 7 * 24 * 60 * 60 * 1000;
 
 function extractJson(body) {
   try { return JSON.parse(body); } catch(_) {}
-  const match = body.match(/<pre[^>]*>([\s\S]*?)<\/pre>/i);
-  if (match) { try { return JSON.parse(match[1]); } catch(_) {} }
-  const jsonMatch = body.match(/(\{[\s\S]*\})/);
-  if (jsonMatch) { try { return JSON.parse(jsonMatch[1]); } catch(_) {} }
+  const m = body.match(/<pre[^>]*>([\s\S]*?)<\/pre>/i);
+  if (m) { try { return JSON.parse(m[1]); } catch(_) {} }
+  const j = body.match(/(\{[\s\S]*\})/);
+  if (j) { try { return JSON.parse(j[1]); } catch(_) {} }
   return null;
 }
 
-async function fetchViaProxy(url, headers) {
-  const res = await fetch(url, {
+async function fetchViaProxy(url, headers = {}) {
+  const res = await undiciFetch(url, {
     dispatcher: proxyAgent,
     redirect: 'follow',
-    headers,
+    headers: { 'User-Agent': rWeb(), ...headers },
   });
   const body = await res.text();
-  return { status: res.status, body, headers: Object.fromEntries(res.headers) };
+  return { status: res.status, body };
 }
 
-async function fetchViaProxyBuffer(url, headers) {
-  const res = await fetch(url, {
-    dispatcher: proxyAgent,
-    redirect: 'follow',
-    headers,
-  });
-  const buffer = Buffer.from(await res.arrayBuffer());
-  return { status: res.status, buffer, contentType: res.headers.get('content-type') || 'image/jpeg' };
-}
-
-// Images fetched directly — CDN is public
 function fetchImageDirect(url) {
   return new Promise((resolve, reject) => {
-    https.get(url, { rejectUnauthorized: false, headers: { 'User-Agent': rWeb(), 'Referer': 'https://www.instagram.com/' } }, (res) => {
+    const req = https.get(url, {
+      rejectUnauthorized: false,
+      headers: { 'User-Agent': rWeb(), 'Referer': 'https://www.instagram.com/' },
+    }, (res) => {
       const chunks = [];
       res.on('data', c => chunks.push(c));
       res.on('end', () => resolve({ status: res.statusCode, buffer: Buffer.concat(chunks), contentType: res.headers['content-type'] || 'image/jpeg' }));
-    }).on('error', reject).setTimeout(10000, function() { this.destroy(); reject(new Error('timeout')); });
+    });
+    req.setTimeout(10000, () => { req.destroy(); reject(new Error('timeout')); });
+    req.on('error', reject);
   });
 }
 
@@ -73,7 +70,6 @@ async function fetchProfile(username) {
       const r = await fetchViaProxy(
         `https://www.instagram.com/api/v1/users/web_profile_info/?username=${encodeURIComponent(username)}`,
         {
-          'User-Agent': rWeb(),
           'x-ig-app-id': '936619743392459',
           'x-requested-with': 'XMLHttpRequest',
           'Accept': '*/*',
@@ -95,7 +91,7 @@ async function fetchProfile(username) {
 
       if (r.status === 429) {
         const wait = (attempt + 1) * 3000 + Math.random() * 2000;
-        console.log(`429 attempt ${attempt + 1}, waiting ${Math.round(wait/1000)}s`);
+        console.log(`429 attempt ${attempt + 1}, waiting ${Math.round(wait / 1000)}s`);
         await new Promise(r => setTimeout(r, wait));
         continue;
       }
@@ -162,16 +158,15 @@ const server = http.createServer(async (req, res) => {
     const log = [];
     const session = SESSION_ID ? decodeURIComponent(SESSION_ID) : '';
     try {
-      const r = await fetchViaProxy('https://api.ipify.org?format=json', { 'User-Agent': 'test' });
+      const r = await fetchViaProxy('https://api.ipify.org?format=json');
       log.push(`Outbound IP: ${r.body}`);
     } catch(e) { log.push(`IP error: ${e.message}`); }
-    log.push(`Session: ${session ? session.substring(0,15)+'...' : 'NOT SET'}`);
+    log.push(`Session: ${session ? session.substring(0, 15) + '...' : 'NOT SET'}`);
     log.push('');
     try {
       const r = await fetchViaProxy(
         'https://www.instagram.com/api/v1/users/web_profile_info/?username=cristiano',
         {
-          'User-Agent': rWeb(),
           'x-ig-app-id': '936619743392459',
           'x-requested-with': 'XMLHttpRequest',
           'Accept': '*/*',
@@ -190,7 +185,7 @@ const server = http.createServer(async (req, res) => {
         log.push(`Followers: ${u.edge_followed_by?.count ?? u.follower_count ?? 'N/A'}`);
         log.push('✓ WORKING');
       } else {
-        log.push(`Response: ${r.body.substring(0, 200)}`);
+        log.push(`Response: ${r.body.substring(0, 300)}`);
       }
     } catch(e) { log.push(`API error: ${e.message}`); }
     res.writeHead(200); res.end(log.join('\n')); return;
