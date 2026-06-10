@@ -8,7 +8,7 @@ const SECRET_KEY = process.env.SECRET_KEY || 'spyxsocial2024';
 
 const PROXY_HOST = 'geo.iproyal.com';
 const PROXY_PORT = 12321;
-const PROXY_AUTH = Buffer.from('cL4V8BOGtvcFAyMi_session-spyxsocial:kAQNBxVBdKYg9T8r').toString('base64');
+const PROXY_AUTH = Buffer.from('cL4V8BOGtvcFAyMi:kAQNBxVBdKYg9T8r').toString('base64');
 
 const WEB_UAS = [
   'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36',
