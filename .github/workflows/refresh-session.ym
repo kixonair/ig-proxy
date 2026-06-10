@@ -1,1 +1,81 @@
+name: Refresh Instagram Session
 
+on:
+  schedule:
+    - cron: '*/5 * * * *'  # every 5 minutes
+  workflow_dispatch:        # manual trigger too
+
+jobs:
+  refresh:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check if session needs refresh
+        id: check
+        run: |
+          # Check Cloudflare KV for session_dead flag
+          RESULT=$(curl -s -X GET \
+            "https://api.cloudflare.com/client/v4/accounts/${{ secrets.CF_ACCOUNT_ID }}/storage/kv/namespaces/${{ secrets.CF_KV_NAMESPACE_ID }}/values/session_dead" \
+            -H "Authorization: Bearer ${{ secrets.CF_API_TOKEN }}")
+          echo "kv_value=$RESULT" >> $GITHUB_OUTPUT
+          echo "KV value: $RESULT"
+
+      - name: Refresh session if dead
+        if: steps.check.outputs.kv_value == 'true'
+        run: |
+          echo "Session dead — logging into Instagram to get fresh session..."
+
+          # Login to Instagram and get session cookie
+          RESPONSE=$(curl -s -c /tmp/cookies.txt -b /tmp/cookies.txt \
+            -X GET "https://www.instagram.com/accounts/login/" \
+            -H "User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/125.0.0.0 Safari/537.36" \
+            -H "Accept: text/html")
+
+          # Get CSRF token
+          CSRF=$(grep csrftoken /tmp/cookies.txt | awk '{print $7}' | head -1)
+          echo "CSRF: $CSRF"
+
+          # Login POST
+          LOGIN_RESPONSE=$(curl -s -c /tmp/cookies.txt -b /tmp/cookies.txt \
+            -X POST "https://www.instagram.com/api/v1/web/accounts/login/ajax/" \
+            -H "User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/125.0.0.0 Safari/537.36" \
+            -H "Content-Type: application/x-www-form-urlencoded" \
+            -H "X-CSRFToken: $CSRF" \
+            -H "X-Requested-With: XMLHttpRequest" \
+            -H "Referer: https://www.instagram.com/accounts/login/" \
+            -H "Origin: https://www.instagram.com" \
+            --data-urlencode "username=${{ secrets.IG_USERNAME }}" \
+            --data-urlencode "enc_password=#PWD_INSTAGRAM_BROWSER:0:$(date +%s):${{ secrets.IG_PASSWORD }}" \
+            --data "queryParams=%7B%7D&optIntoOneTap=false")
+
+          echo "Login response: $LOGIN_RESPONSE"
+
+          # Extract new session ID
+          NEW_SESSION=$(grep sessionid /tmp/cookies.txt | awk '{print $7}' | head -1)
+          echo "New session: ${NEW_SESSION:0:20}..."
+
+          if [ -z "$NEW_SESSION" ]; then
+            echo "Failed to get session"
+            exit 1
+          fi
+
+          # Update Cloudflare Worker env variable
+          curl -s -X PATCH \
+            "https://api.cloudflare.com/client/v4/accounts/${{ secrets.CF_ACCOUNT_ID }}/workers/scripts/${{ secrets.CF_WORKER_NAME }}/settings" \
+            -H "Authorization: Bearer ${{ secrets.CF_API_TOKEN }}" \
+            -H "Content-Type: application/json" \
+            --data "{\"bindings\": [{\"type\": \"plain_text\", \"name\": \"IG_SESSION_ID\", \"text\": \"$(python3 -c "import urllib.parse; print(urllib.parse.quote('$NEW_SESSION'))")\"}]}"
+
+          echo "Updated IG_SESSION_ID in Cloudflare Worker"
+
+          # Clear the session_dead flag in KV
+          curl -s -X PUT \
+            "https://api.cloudflare.com/client/v4/accounts/${{ secrets.CF_ACCOUNT_ID }}/storage/kv/namespaces/${{ secrets.CF_KV_NAMESPACE_ID }}/values/session_dead" \
+            -H "Authorization: Bearer ${{ secrets.CF_API_TOKEN }}" \
+            -H "Content-Type: text/plain" \
+            --data "false"
+
+          echo "Session refreshed successfully!"
+
+      - name: No refresh needed
+        if: steps.check.outputs.kv_value != 'true'
+        run: echo "Session is healthy, no refresh needed"
